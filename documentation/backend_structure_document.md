@@ -1,179 +1,181 @@
 # Backend Structure Document
 
-This document outlines the backend architecture, hosting, and infrastructure for the **codeguide-starter** project. It uses plain language so anyone can understand how the backend is set up and how it supports the application.
+This document outlines the backend architecture, database setup, APIs, hosting, infrastructure, and maintenance plans for the AI-powered, multi-tenant e-menu ordering system for cafes. It’s written in everyday language so that anyone—technical or not—can understand how everything fits together.
 
-## 1. Backend Architecture
+## Backend Architecture
 
-- **Framework and Design Pattern**
-  - We use **Next.js API Routes** to handle all server-side logic. These routes live alongside the frontend code in the same repository, making development and deployment simpler.
-  - The backend follows a **layered pattern**:
-    1. **API Layer**: Receives requests (login, registration, data fetch).  
-    2. **Service Layer**: Contains the core business logic (user validation, password hashing).  
-    3. **Data Access Layer**: Talks to the database via a simple ORM (e.g., Prisma or TypeORM).
+### Overview
+The backend is built on top of Next.js 15’s App Router, which lets us handle both pages and API routes in a single codebase. It follows a serverless-friendly, modular design: every feature (authentication, chat, orders, menus) lives in its own folder under `app/api` or `app/`.
 
-- **Scalability**
-  - Stateless API routes can scale horizontally—new instances can spin up on demand.  
-  - We can add caching or a message queue (e.g., Redis or RabbitMQ) without changing the core code.
+### Key Design Patterns and Frameworks
+- **Next.js API Routes**: Each endpoint is a self-contained function. This simplifies scaling (each route can auto-scale) and keeps code organized.
+- **Dynamic Multi-tenant Routing**: We use URL segments like `/[resto-slug]` to serve different cafes without duplicating code.
+- **Tool-Calling Pattern**: The AI chat route exposes functions (tools) such as `searchMenu` and `addToCart`. Gemini can call these tools to run queries or update the cart, keeping business logic separate from natural-language handling.
+- **Drizzle ORM**: Provides type-safe definitions of our database schema and auto-generates SQL queries, making our code more maintainable and reducing runtime errors.
 
-- **Maintainability**
-  - Code for each feature is grouped by route (authentication, dashboard).  
-  - A service layer separates complex logic from request handling.
+### Scalability, Maintainability, Performance
+- **Scalability**: Serverless routes on Vercel (or similar) handle sudden traffic spikes. The relational database scales vertically and horizontally for read-heavy queries via replicas.
+- **Maintainability**: Clear folder structure and type safety from TypeScript and Drizzle help new developers onboard quickly and catch errors early.
+- **Performance**: Streaming AI responses with Vercel AI SDK, coupled with edge caching for menu data, ensures snappy interactions.
 
-- **Performance**
-  - Lightweight Node.js handlers keep response times low.  
-  - Future use of database connection pooling and Redis for caching repeated queries.
+## Database Management
 
-## 2. Database Management
+### Technologies Used
+- PostgreSQL (relational SQL database) for reliable, ACID-compliant storage.
+- Drizzle ORM for writing type-safe queries and managing migrations.
+- Docker Compose for spinning up a local Postgres instance that mirrors production.
 
-- **Database Choice**
-  - We recommend **PostgreSQL** for structured data and reliable transactions.  
-  - In-memory caching can be added later with **Redis** for session tokens or frequently read data.
+### Data Structure and Access
+- **Multi-tenant Model**: Every record in tables like `menu_items`, `orders`, and `order_items` carries a `restaurant_id` foreign key to isolate data per cafe.
+- **Migrations**: Drizzle scripts track schema changes, ensuring every environment (dev, staging, prod) has the same structure.
+- **Indexes**: We add indexes on `restaurant_id`, `slug`, and `order_status` to speed up lookups.
 
-- **Data Storage and Access**
-  - Use an ORM like **Prisma** or **TypeORM** to map JavaScript/TypeScript objects to database tables.
-  - Connection pooling ensures efficient use of database connections under load.
-  - Migrations track schema changes over time, keeping development, staging, and production in sync.
+## Database Schema
 
-- **Data Practices**
-  - Passwords are never stored in plain text—they are salted and hashed with **bcrypt** before saving.
-  - All outgoing data is typed and validated to prevent malformed records.
+### Human-Readable Overview
+1. **restaurants**: Stores each cafe’s details (name, slug, branding).
+2. **menu_items**: Lists items each cafe offers (title, description, price, allergens).
+3. **orders**: Captures one chat-driven order (total amount, status, timestamp).
+4. **order_items**: Links `orders` to the specific `menu_items` in that order.
+5. **users** (admins): Contains cafe admin login info (email, password hash, role).
 
-## 3. Database Schema
-
-### Human-Readable Format
-
-- **Users**
-  - **id**: Unique identifier  
-  - **email**: User’s email address (unique)  
-  - **password_hash**: Securely hashed password  
-  - **created_at**: Account creation timestamp
-
-- **Sessions**
-  - **id**: Unique session record  
-  - **user_id**: Links to a user  
-  - **token**: Random string for authentication  
-  - **expires_at**: When the token stops working  
-  - **created_at**: When the session was created
-
-- **DashboardItems** *(optional for dynamic data)*
-  - **id**: Unique record  
-  - **title**: Item title  
-  - **content**: Item details  
-  - **created_at**: When the item was added
-
-### SQL Schema (PostgreSQL)
+### PostgreSQL Schema Definition
 ```sql
--- Users table
-CREATE TABLE users (
-  id SERIAL PRIMARY KEY,
-  email VARCHAR(255) UNIQUE NOT NULL,
-  password_hash VARCHAR(255) NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT now()
+-- 1. restaurants
+drop table if exists restaurants;
+create table restaurants (
+  id serial primary key,
+  name text not null,
+  slug text unique not null,
+  theme jsonb default '{}' not null,
+  created_at timestamptz default now()
 );
 
--- Sessions table
-CREATE TABLE sessions (
-  id SERIAL PRIMARY KEY,
-  user_id INT REFERENCES users(id) ON DELETE CASCADE,
-  token VARCHAR(255) UNIQUE NOT NULL,
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT now()
+-- 2. menu_items
+drop table if exists menu_items;
+create table menu_items (
+  id serial primary key,
+  restaurant_id int references restaurants(id) on delete cascade,
+  title text not null,
+  description text,
+  price numeric(8,2) not null,
+  allergens text[],
+  created_at timestamptz default now()
+);
+create index on menu_items(restaurant_id);
+
+-- 3. orders
+drop table if exists orders;
+create table orders (
+  id serial primary key,
+  restaurant_id int references restaurants(id) on delete cascade,
+  total_amount numeric(10,2) not null,
+  status text not null default 'pending',
+  created_at timestamptz default now()
+);
+create index on orders(restaurant_id);
+create index on orders(status);
+
+-- 4. order_items
+drop table if exists order_items;
+create table order_items (
+  id serial primary key,
+  order_id int references orders(id) on delete cascade,
+  menu_item_id int references menu_items(id),
+  quantity int not null default 1
 );
 
--- Dashboard items table
-CREATE TABLE dashboard_items (
-  id SERIAL PRIMARY KEY,
-  title TEXT NOT NULL,
-  content TEXT,
-  created_at TIMESTAMPTZ DEFAULT now()
+-- 5. users
+drop table if exists users;
+create table users (
+  id serial primary key,
+  email text unique not null,
+  password_hash text not null,
+  role text not null default 'admin',
+  restaurant_id int references restaurants(id),
+  created_at timestamptz default now()
 );
 ```  
 
-## 4. API Design and Endpoints
+## API Design and Endpoints
 
-- **Approach**: We follow a **RESTful** style, grouping related endpoints under `/api` directories.
+We follow a REST-style approach, with clear separation of concerns for each resource.
 
-- **Key Endpoints**
-  - `POST /api/auth/register`  
-    • Accepts `{ email, password }`  
-    • Creates a new user and issues a session token  
-  - `POST /api/auth/login`  
-    • Accepts `{ email, password }`  
-    • Verifies credentials and returns a session token  
-  - `POST /api/auth/logout`  
-    • Invalidates the session token on the server  
-  - `GET /api/dashboard/data`  
-    • Requires a valid session  
-    • Returns user-specific data or dashboard items  
+### Authentication
+- **POST /api/auth/sign-up**: Register a new admin user. Uses Better Auth under the hood.
+- **POST /api/auth/login**: Sign in and receive a session token.
+- **POST /api/auth/logout**: Invalidate session.
 
-- **Communication**
-  - Frontend sends JSON requests; backend replies with JSON and appropriate HTTP status codes.  
-  - Protected routes check for a valid session token (in cookies or Authorization header).
+### Restaurant & Menu
+- **GET /api/restaurants/[slug]/menu**: Fetch menu items for a given cafe slug.
+  - Inputs: `slug` in URL.
+  - Returns: List of menu items.
 
-## 5. Hosting Solutions
+### AI Chat
+- **POST /api/chat**: Handle incoming customer messages, stream AI responses, and perform tool calls.
+  - Inputs: customer message, restaurant slug.
+  - Tools available: `searchMenu`, `addToCart`, `getAllergens`.
+  - Output: Streaming AI response with tool results embedded.
 
-- **Cloud Provider**:  
-  - **Vercel** (recommended) offers seamless Next.js deployments, auto-scaling, and built-in CDN.  
-  - Alternatively, **Netlify** or any Node.js-capable host will work.
+### Orders
+- **POST /api/orders**: Create a new order based on the customer’s cart.
+  - Inputs: `restaurant_slug`, `cart_items` (menu_item_id, quantity).
+  - Process: Validates items, calculates total, writes to `orders` and `order_items`.
+- **GET /api/orders**: List all orders for the authenticated admin’s restaurant.
+- **PUT /api/orders/[orderId]**: Update an order’s status (e.g., `pending` → `completed`).
 
-- **Benefits**
-  - **Reliability**: Global servers and failover across regions.  
-  - **Scalability**: Auto-scale serverless functions based on traffic.  
-  - **Cost-Effectiveness**: Pay-per-use model means low cost for small projects.
+### Admin Dashboard
+- **GET /api/dashboard/orders**: Alias for `GET /api/orders`, but scoped to the logged-in user.
 
-## 6. Infrastructure Components
+## Hosting Solutions
 
-- **Load Balancer**
-  - Provided by the hosting platform—distributes API requests across function instances.
+### Production Environment
+- **Next.js App**: Deployed on **Vercel**, which provides built-in CDN, SSL, auto-scaling, and zero-config deployments.
+- **PostgreSQL Database**: Hosted on **AWS RDS** (or any managed Postgres service). Offers automated backups, failover, and vertical/horizontal scaling.
 
-- **CDN (Content Delivery Network)**
-  - Vercel’s global edge network caches static assets (CSS, JS, images) for faster page loads.
+### Development Environment
+- **Docker Compose**: Runs a local Postgres and Next.js instance. Mirrors production settings for consistency.
 
-- **Caching**
-  - **Redis** (optional) for session storage or caching dashboard queries to reduce database load.
+### Benefits
+- **Reliability**: Managed services handle backups, failover, and updates.
+- **Scalability**: Vercel auto-scales serverless functions. RDS can add read replicas.
+- **Cost-Effectiveness**: Pay-as-you-go pricing and the ability to start small in early stages.
 
-- **Object Storage**
-  - For file uploads or backups, integrate with AWS S3 or similar services.
+## Infrastructure Components
 
-- **Message Queue**
-  - In future, use **RabbitMQ** or **Kafka** for background tasks (e.g., email notifications).
+- **Load Balancer / Edge Network**: Provided by Vercel. Routes requests to the nearest edge location.
+- **CDN**: Automatically caches static assets (JS, CSS, images) at edge locations.
+- **Caching Layer**: We recommend adding a Redis cache (e.g., AWS ElastiCache) for frequent menu lookups or AI tool results to reduce database load.
+- **Logging & Monitoring**: Integrated with Vercel logs, plus optional Sentry or Datadog for error tracking.
+- **SSL/TLS**: Managed by Vercel, ensuring secure data in transit.
 
-## 7. Security Measures
+## Security Measures
 
-- **Authentication & Authorization**
-  - Passwords hashed with **bcrypt** and salted.  
-  - Session tokens stored in secure, HttpOnly cookies or Authorization headers.  
-  - Protected endpoints verify tokens before proceeding.
+- **Authentication**: Better Auth handles sign-up, login, session management with secure cookies and JWTs.
+- **Authorization**: Middleware checks user roles—only admins can access dashboard routes.
+- **Input Validation**: All API inputs (chat prompts, order payloads) are validated using a schema (e.g., Zod) to prevent injection attacks.
+- **Rate Limiting**: Applied to `/api/chat` to prevent abuse and control AI usage costs.
+- **Encryption**:
+  - **In Transit**: TLS everywhere (SSL handled by Vercel).
+  - **At Rest**: Encryption on RDS volumes.
+- **Secrets Management**: Environment variables stored securely in Vercel or your cloud provider.
 
-- **Data Encryption**
-  - **HTTPS/TLS** encrypts data in transit.  
-  - Database connections use SSL to encrypt data between the app and the database.
+## Monitoring and Maintenance
 
-- **Input Validation**
-  - Every incoming request is validated (e.g., valid email format, password length) to prevent SQL injection or other attacks.
+- **Performance Monitoring**: Vercel Insights tracks function latency and error rates.
+- **Error Tracking**: Sentry (or similar) captures exceptions in API routes and cron jobs.
+- **Health Checks**: Automatic uptime checks for critical endpoints (e.g., `GET /api/health`).
+- **Database Backups**: Automated daily snapshots and point-in-time recovery on RDS.
+- **Schema Migrations**: Managed with Drizzle’s migration CLI—run in CI/CD before deploy.
+- **Dependency Updates**: Use tools like Dependabot to keep libraries up to date.
 
-- **Web Security Best Practices**
-  - Enable **CORS** policies to limit allowed origins.  
-  - Use **CSRF tokens** or same-site cookies to prevent cross-site requests.  
-  - Set secure headers with **Helmet** or a similar middleware.
+## Conclusion and Overall Backend Summary
 
-## 8. Monitoring and Maintenance
+This backend is designed to be **secure**, **scalable**, and **easy to maintain**. Using Next.js API routes and serverless deployment on Vercel ensures we can handle variable traffic without manual scaling. PostgreSQL with Drizzle ORM gives us a robust, type-safe data layer that supports multi-tenant isolation. The AI tool-calling pattern powers a natural conversation interface for ordering, while built-in CI/CD, monitoring, and managed hosting guarantee reliability and quick updates.
 
-- **Performance Monitoring**
-  - Integrate **Sentry** or **LogRocket** for real-time crash reporting and performance tracing.  
-  - Use Vercel’s built-in analytics to track request latencies and error rates.
+Unique aspects:
+- **Dynamic Multi-Tenant Routing** via URL slugs.
+- **AI Tool Calling** for real-time chat integration.
+- **Dockerized Local Setup** for consistent developer experience.
 
-- **Logging**
-  - Structured logs (JSON) for all API requests and errors, shipped to a log management service like **Datadog** or **Logflare**.
-
-- **Health Checks**
-  - Define a `/health` endpoint that returns a 200 status if the service is up and the database is reachable.
-
-- **Maintenance Strategies**
-  - Automated migrations run on deploy to keep the database schema up to date.  
-  - Scheduled dependency audits and security scans (e.g., `npm audit`).
-  - Regular backups of the database (daily or weekly depending on usage).
-
-## 9. Conclusion and Overall Backend Summary
-
-The backend for **codeguide-starter** is built on Next.js API Routes and Node.js, paired with PostgreSQL for data and optional Redis for caching. It follows a clear layered architecture that keeps code easy to maintain and extend. With RESTful endpoints for authentication and data, secure practices like password hashing and HTTPS, and hosting on Vercel for scalability and global performance, this setup meets the project’s goals for a fast, secure, and developer-friendly foundation. Future enhancements—such as background job queues, advanced monitoring, or richer data models—can be added without disrupting the core structure.
+All components—from authentication to AI chat to order management—work together seamlessly to deliver a modern, AI-driven e-menu platform for cafes.
